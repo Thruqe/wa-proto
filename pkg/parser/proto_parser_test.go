@@ -27,3 +27,4 @@ func TestParseProto_WAProto(t *testing.T) {
 
 	t.Logf("Parsed %d messages and %d enums. Version: %s", len(schema.Messages), len(schema.Enums), schema.Version)
 }
+

@@ -43,8 +43,24 @@ func ParseProto(r io.Reader) (*ast.ProtoSchema, error) {
 	}
 
 	idx := 0
+	inBlockComment := false
 	for idx < len(lines) {
 		line := strings.TrimSpace(lines[idx])
+		if inBlockComment {
+			if strings.Contains(line, "*/") {
+				inBlockComment = false
+			}
+			idx++
+			continue
+		}
+		if strings.HasPrefix(line, "/*") {
+			if !strings.Contains(line, "*/") {
+				inBlockComment = true
+			}
+			idx++
+			continue
+		}
+
 		if line == "" || strings.HasPrefix(line, "//") {
 			if m := versionRe.FindStringSubmatch(line); len(m) > 1 {
 				schema.Version = m[1]
@@ -70,7 +86,9 @@ func ParseProto(r io.Reader) (*ast.ProtoSchema, error) {
 			if err != nil {
 				return nil, err
 			}
-			schema.Enums = append(schema.Enums, enumDef)
+			if len(enumDef.Values) > 0 {
+				schema.Enums = append(schema.Enums, enumDef)
+			}
 			idx = nextIdx
 			continue
 		}

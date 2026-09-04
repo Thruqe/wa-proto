@@ -5169,10 +5169,10 @@ message QP {
     }
     
     enum FilterResult {
-    FILTERRESULT_UNKNOWN = 0;
+        FILTERRESULT_UNSPECIFIED = 0;
         TRUE = 1;
         FALSE = 2;
-        FILTERRESULT_UNKNOWN = 3;
+        UNKNOWN = 3;
     }
 }
 

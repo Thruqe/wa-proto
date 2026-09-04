@@ -141,18 +141,23 @@ func GenerateModular(schema *ast.ProtoSchema, outDir string) (*Report, error) {
 		}
 
 		// Merge with existing declarations if target file already exists on disk
-		mergeWithExistingFile(targetFilePath, &msgs, &enums, neededImports)
+		mergeWithExistingFile(targetFilePath, &msgs, &enums, neededImports, pkgDir)
 
-		// Collect all types locally defined in this package
-		localTypes := make(map[string]bool)
+		// Collect ONLY top-level types defined in this package
+		topLevelTypes := make(map[string]bool)
 		for _, m := range msgs {
-			collectLocalTypes(m, localTypes)
+			topLevelTypes[m.Name] = true
 		}
 		for _, e := range enums {
-			localTypes[e.Name] = true
+			topLevelTypes[e.Name] = true
 		}
 
-		// Collect referenced types to compute needed imports
+		// Qualify external types in all messages BEFORE calculating imports
+		for _, m := range msgs {
+			qualifyExternalTypes(m, pkgDir, topLevelTypes)
+		}
+
+		// Collect referenced types after qualification to compute needed imports
 		referencedTypes := make(map[string]bool)
 		for _, m := range msgs {
 			collectMessageTypes(m, referencedTypes)
@@ -160,12 +165,32 @@ func GenerateModular(schema *ast.ProtoSchema, outDir string) (*Report, error) {
 
 		for t := range referencedTypes {
 			cleanType := strings.TrimPrefix(t, ".")
-			if catalog.IsScalarType(cleanType) || localTypes[cleanType] {
+			parts := strings.Split(cleanType, ".")
+			rootType := parts[0]
+			if catalog.IsScalarType(cleanType) || topLevelTypes[cleanType] || topLevelTypes[rootType] {
 				continue
 			}
-			refPkg := catalog.LookupPackageForType(cleanType)
+
+			// Check if rootType is a known package name (e.g. "WACommon" from WACommon.MessageKey)
+			var refPkg string
+			for _, p := range catalog.Packages {
+				if p.Package == rootType {
+					refPkg = p.Dir
+					break
+				}
+			}
+			if refPkg == "" {
+				refPkg = catalog.LookupPackageForType(rootType)
+			}
+
 			if refPkg != "" && refPkg != pkgDir {
 				if refPkg == "waE2E" && pkgDir != "waHistorySync" && pkgDir != "waWeb" && pkgDir != "waGroupHistory" {
+					continue
+				}
+				if pkgDir == "waE2E" && (refPkg == "waHistorySync" || refPkg == "waWeb" || refPkg == "waGroupHistory") {
+					continue
+				}
+				if pkgDir == "waCompanionReg" && refPkg == "waHistorySync" {
 					continue
 				}
 				if refMeta, ok := catalog.Packages[refPkg]; ok {
@@ -210,7 +235,6 @@ func GenerateModular(schema *ast.ProtoSchema, outDir string) (*Report, error) {
 			return msgs[i].Name < msgs[j].Name
 		})
 		for _, m := range msgs {
-			qualifyExternalTypes(m, pkgDir, localTypes)
 			b.WriteString(m.FormatProto2(""))
 			b.WriteString("\n\n")
 			report.TotalMessages++
@@ -258,36 +282,44 @@ func isScalarType(t string) bool {
 	return catalog.IsScalarType(t)
 }
 
-func collectLocalTypes(m *ast.MessageDef, acc map[string]bool) {
-	acc[m.Name] = true
+func qualifyExternalTypes(m *ast.MessageDef, currentPkg string, scopeTypes map[string]bool) {
+	currentScope := make(map[string]bool)
+	for k, v := range scopeTypes {
+		currentScope[k] = v
+	}
 	for _, ne := range m.NestedEnums {
-		acc[ne.Name] = true
-		acc[m.Name+"."+ne.Name] = true
+		currentScope[ne.Name] = true
 	}
 	for _, nm := range m.NestedMessages {
-		collectLocalTypes(nm, acc)
-		acc[m.Name+"."+nm.Name] = true
+		currentScope[nm.Name] = true
 	}
-}
 
-func qualifyExternalTypes(m *ast.MessageDef, currentPkg string, localTypes map[string]bool) {
 	for _, f := range m.Fields {
-		qualifyField(f, currentPkg, localTypes)
+		qualifyField(f, currentPkg, currentScope)
 	}
 	for _, o := range m.Oneofs {
 		for _, f := range o.Fields {
-			qualifyField(f, currentPkg, localTypes)
+			qualifyField(f, currentPkg, currentScope)
 		}
 	}
 	for _, nm := range m.NestedMessages {
-		qualifyExternalTypes(nm, currentPkg, localTypes)
+		qualifyExternalTypes(nm, currentPkg, currentScope)
 	}
 }
 
 func qualifyField(f *ast.FieldDef, currentPkg string, localTypes map[string]bool) {
-	cleanType := strings.TrimPrefix(f.Type, ".")
-	if catalog.IsScalarType(cleanType) || localTypes[cleanType] {
+	if f.IsMap {
+		f.MapKey = qualifySingleType(f.MapKey, currentPkg, localTypes)
+		f.MapValue = qualifySingleType(f.MapValue, currentPkg, localTypes)
 		return
+	}
+	f.Type = qualifySingleType(f.Type, currentPkg, localTypes)
+}
+
+func qualifySingleType(t string, currentPkg string, localTypes map[string]bool) string {
+	cleanType := strings.TrimPrefix(t, ".")
+	if catalog.IsScalarType(cleanType) || localTypes[cleanType] {
+		return t
 	}
 
 	parts := strings.Split(cleanType, ".")
@@ -296,26 +328,33 @@ func qualifyField(f *ast.FieldDef, currentPkg string, localTypes map[string]bool
 	// Check if rootType is already a known package name
 	for _, pkg := range catalog.Packages {
 		if pkg.Package == rootType {
-			return
+			return t
 		}
 	}
 
-	// Check if rootType is defined locally in this package
+	// Check if rootType is defined locally in this scope
 	if localTypes[rootType] {
-		return
+		return t
 	}
 
 	refPkg := catalog.LookupPackageForType(rootType)
 	if refPkg != "" && refPkg != currentPkg {
+		if currentPkg == "waE2E" && (refPkg == "waHistorySync" || refPkg == "waWeb" || refPkg == "waGroupHistory") {
+			return t
+		}
+		if currentPkg == "waCompanionReg" && refPkg == "waHistorySync" {
+			return t
+		}
 		if refMeta, ok := catalog.Packages[refPkg]; ok {
-			f.Type = refMeta.Package + "." + cleanType
+			return refMeta.Package + "." + cleanType
 		}
 	}
+	return t
 }
 
 var impRegex = regexp.MustCompile(`^import\s+"([^"]+)";`)
 
-func mergeWithExistingFile(filePath string, msgs *[]*ast.MessageDef, enums *[]*ast.EnumDef, neededImports map[string]bool) {
+func mergeWithExistingFile(filePath string, msgs *[]*ast.MessageDef, enums *[]*ast.EnumDef, neededImports map[string]bool, currentPkg string) {
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		return
@@ -334,25 +373,161 @@ func mergeWithExistingFile(filePath string, msgs *[]*ast.MessageDef, enums *[]*a
 		return
 	}
 
-	msgMap := make(map[string]bool)
-	for _, m := range *msgs {
-		msgMap[m.Name] = true
+	// 1. Merge enums: preserve existing enum constant names, append new values
+	existingEnumMap := make(map[string]*ast.EnumDef)
+	for _, ee := range existingSchema.Enums {
+		existingEnumMap[ee.Name] = ee
 	}
+	var mergedEnums []*ast.EnumDef
+	for _, ee := range existingSchema.Enums {
+		mergedEnums = append(mergedEnums, ee)
+	}
+	for _, ie := range *enums {
+		if exE, exists := existingEnumMap[ie.Name]; exists {
+			mergeEnumValues(exE, ie)
+		} else {
+			mergedEnums = append(mergedEnums, ie)
+			existingEnumMap[ie.Name] = ie
+		}
+	}
+	*enums = mergedEnums
+
+	// 2. Merge messages: preserve existing field names and casing, append new fields
+	existingMsgMap := make(map[string]*ast.MessageDef)
 	for _, em := range existingSchema.Messages {
-		if !msgMap[em.Name] {
-			*msgs = append(*msgs, em)
-			msgMap[em.Name] = true
+		existingMsgMap[em.Name] = em
+	}
+	var mergedMsgs []*ast.MessageDef
+	for _, em := range existingSchema.Messages {
+		mergedMsgs = append(mergedMsgs, em)
+	}
+	for _, im := range *msgs {
+		if exM, exists := existingMsgMap[im.Name]; exists {
+			mergeMessage(exM, im, existingMsgMap, currentPkg)
+		} else {
+			mergedMsgs = append(mergedMsgs, im)
+			existingMsgMap[im.Name] = im
+		}
+	}
+	*msgs = mergedMsgs
+}
+
+func mergeMessage(existing *ast.MessageDef, incoming *ast.MessageDef, topLevelMsgs map[string]*ast.MessageDef, currentPkg string) {
+	// Track all field IDs used in existing message (both normal fields and oneof fields)
+	usedFieldIDs := make(map[int]bool)
+	for _, f := range existing.Fields {
+		usedFieldIDs[f.ID] = true
+	}
+	for _, o := range existing.Oneofs {
+		for _, f := range o.Fields {
+			usedFieldIDs[f.ID] = true
 		}
 	}
 
-	enumMap := make(map[string]bool)
-	for _, e := range *enums {
-		enumMap[e.Name] = true
+	// 1. Merge regular fields
+	for _, inf := range incoming.Fields {
+		if !usedFieldIDs[inf.ID] {
+			existing.Fields = append(existing.Fields, inf)
+			usedFieldIDs[inf.ID] = true
+		}
 	}
-	for _, ee := range existingSchema.Enums {
-		if !enumMap[ee.Name] {
-			*enums = append(*enums, ee)
-			enumMap[ee.Name] = true
+
+	// 2. Merge Oneofs (with case-insensitive name matching and field ID deduplication)
+	for _, ino := range incoming.Oneofs {
+		var matchedOneof *ast.OneofDef
+		for _, exO := range existing.Oneofs {
+			if strings.EqualFold(exO.Name, ino.Name) {
+				matchedOneof = exO
+				break
+			}
+		}
+
+		if matchedOneof != nil {
+			for _, inF := range ino.Fields {
+				if !usedFieldIDs[inF.ID] {
+					matchedOneof.Fields = append(matchedOneof.Fields, inF)
+					usedFieldIDs[inF.ID] = true
+				}
+			}
+		} else {
+			var newFields []*ast.FieldDef
+			for _, inF := range ino.Fields {
+				if !usedFieldIDs[inF.ID] {
+					newFields = append(newFields, inF)
+				}
+			}
+			if len(newFields) > 0 {
+				ino.Fields = newFields
+				for _, inF := range newFields {
+					usedFieldIDs[inF.ID] = true
+				}
+				existing.Oneofs = append(existing.Oneofs, ino)
+			}
+		}
+	}
+
+	// 3. Nested Enums
+	enumByName := make(map[string]*ast.EnumDef)
+	existingEnumValues := make(map[string]bool)
+	for _, e := range existing.NestedEnums {
+		enumByName[e.Name] = e
+		for _, v := range e.Values {
+			existingEnumValues[v.Name] = true
+		}
+	}
+	for _, ine := range incoming.NestedEnums {
+		if exE, exists := enumByName[ine.Name]; exists {
+			mergeEnumValues(exE, ine)
+		} else {
+			clash := false
+			for _, v := range ine.Values {
+				if existingEnumValues[v.Name] {
+					clash = true
+					break
+				}
+			}
+			if !clash {
+				existing.NestedEnums = append(existing.NestedEnums, ine)
+				enumByName[ine.Name] = ine
+				for _, v := range ine.Values {
+					existingEnumValues[v.Name] = true
+				}
+			}
+		}
+	}
+
+	// 4. Nested Messages
+	nestedMsgByName := make(map[string]*ast.MessageDef)
+	for _, nm := range existing.NestedMessages {
+		nestedMsgByName[nm.Name] = nm
+	}
+	for _, inm := range incoming.NestedMessages {
+		// If inm is already a top-level message in this package or catalog, merge into top-level and don't nest!
+		if topLevelM, exists := topLevelMsgs[inm.Name]; exists {
+			mergeMessage(topLevelM, inm, topLevelMsgs, currentPkg)
+			continue
+		}
+		if catalog.LookupPackageForType(inm.Name) == currentPkg {
+			continue
+		}
+		if exNm, exists := nestedMsgByName[inm.Name]; exists {
+			mergeMessage(exNm, inm, topLevelMsgs, currentPkg)
+		} else {
+			existing.NestedMessages = append(existing.NestedMessages, inm)
+			nestedMsgByName[inm.Name] = inm
+		}
+	}
+}
+
+func mergeEnumValues(existing *ast.EnumDef, incoming *ast.EnumDef) {
+	valByID := make(map[int]bool)
+	for _, v := range existing.Values {
+		valByID[v.ID] = true
+	}
+	for _, inv := range incoming.Values {
+		if !valByID[inv.ID] {
+			existing.Values = append(existing.Values, inv)
+			valByID[inv.ID] = true
 		}
 	}
 }
