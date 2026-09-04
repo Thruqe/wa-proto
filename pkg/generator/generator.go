@@ -1,6 +1,8 @@
 package generator
 
 import (
+	"bufio"
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -13,6 +15,7 @@ import (
 	"github.com/Thruqe/wa-proto/pkg/ast"
 	"github.com/Thruqe/wa-proto/pkg/catalog"
 	"github.com/Thruqe/wa-proto/pkg/corrector"
+	"github.com/Thruqe/wa-proto/pkg/parser"
 )
 
 // Report contains statistics about the generation process.
@@ -103,9 +106,12 @@ func GenerateModular(schema *ast.ProtoSchema, outDir string) (*Report, error) {
 	}
 
 	for _, pkgDir := range pkgNames {
+		if pkgDir == "" {
+			continue
+		}
 		meta, exists := catalog.Packages[pkgDir]
 		if !exists {
-			meta = &catalog.PackageMeta{
+			meta = catalog.PackageMeta{
 				Dir:       pkgDir,
 				File:      pkgDir + ".proto",
 				Package:   pkgDir,
@@ -128,6 +134,15 @@ func GenerateModular(schema *ast.ProtoSchema, outDir string) (*Report, error) {
 
 		targetFilePath := filepath.Join(targetDirPath, meta.File)
 
+		// Calculate required imports based on baseline and referenced external types
+		neededImports := make(map[string]bool)
+		for _, imp := range meta.Imports {
+			neededImports[imp] = true
+		}
+
+		// Merge with existing declarations if target file already exists on disk
+		mergeWithExistingFile(targetFilePath, &msgs, &enums, neededImports)
+
 		// Collect all types locally defined in this package
 		localTypes := make(map[string]bool)
 		for _, m := range msgs {
@@ -143,8 +158,6 @@ func GenerateModular(schema *ast.ProtoSchema, outDir string) (*Report, error) {
 			collectMessageTypes(m, referencedTypes)
 		}
 
-		// Calculate required imports based on actual referenced external types
-		neededImports := make(map[string]bool)
 		for t := range referencedTypes {
 			cleanType := strings.TrimPrefix(t, ".")
 			if catalog.IsScalarType(cleanType) || localTypes[cleanType] {
@@ -152,6 +165,9 @@ func GenerateModular(schema *ast.ProtoSchema, outDir string) (*Report, error) {
 			}
 			refPkg := catalog.LookupPackageForType(cleanType)
 			if refPkg != "" && refPkg != pkgDir {
+				if refPkg == "waE2E" && pkgDir != "waHistorySync" && pkgDir != "waWeb" && pkgDir != "waGroupHistory" {
+					continue
+				}
 				if refMeta, ok := catalog.Packages[refPkg]; ok {
 					impPath := refMeta.Dir + "/" + refMeta.File
 					neededImports[impPath] = true
@@ -194,6 +210,7 @@ func GenerateModular(schema *ast.ProtoSchema, outDir string) (*Report, error) {
 			return msgs[i].Name < msgs[j].Name
 		})
 		for _, m := range msgs {
+			qualifyExternalTypes(m, pkgDir, localTypes)
 			b.WriteString(m.FormatProto2(""))
 			b.WriteString("\n\n")
 			report.TotalMessages++
@@ -250,6 +267,93 @@ func collectLocalTypes(m *ast.MessageDef, acc map[string]bool) {
 	for _, nm := range m.NestedMessages {
 		collectLocalTypes(nm, acc)
 		acc[m.Name+"."+nm.Name] = true
+	}
+}
+
+func qualifyExternalTypes(m *ast.MessageDef, currentPkg string, localTypes map[string]bool) {
+	for _, f := range m.Fields {
+		qualifyField(f, currentPkg, localTypes)
+	}
+	for _, o := range m.Oneofs {
+		for _, f := range o.Fields {
+			qualifyField(f, currentPkg, localTypes)
+		}
+	}
+	for _, nm := range m.NestedMessages {
+		qualifyExternalTypes(nm, currentPkg, localTypes)
+	}
+}
+
+func qualifyField(f *ast.FieldDef, currentPkg string, localTypes map[string]bool) {
+	cleanType := strings.TrimPrefix(f.Type, ".")
+	if catalog.IsScalarType(cleanType) || localTypes[cleanType] {
+		return
+	}
+
+	parts := strings.Split(cleanType, ".")
+	rootType := parts[0]
+
+	// Check if rootType is already a known package name
+	for _, pkg := range catalog.Packages {
+		if pkg.Package == rootType {
+			return
+		}
+	}
+
+	// Check if rootType is defined locally in this package
+	if localTypes[rootType] {
+		return
+	}
+
+	refPkg := catalog.LookupPackageForType(rootType)
+	if refPkg != "" && refPkg != currentPkg {
+		if refMeta, ok := catalog.Packages[refPkg]; ok {
+			f.Type = refMeta.Package + "." + cleanType
+		}
+	}
+}
+
+var impRegex = regexp.MustCompile(`^import\s+"([^"]+)";`)
+
+func mergeWithExistingFile(filePath string, msgs *[]*ast.MessageDef, enums *[]*ast.EnumDef, neededImports map[string]bool) {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return
+	}
+
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if m := impRegex.FindStringSubmatch(line); len(m) > 1 {
+			neededImports[m[1]] = true
+		}
+	}
+
+	existingSchema, err := parser.ParseProto(bytes.NewReader(data))
+	if err != nil {
+		return
+	}
+
+	msgMap := make(map[string]bool)
+	for _, m := range *msgs {
+		msgMap[m.Name] = true
+	}
+	for _, em := range existingSchema.Messages {
+		if !msgMap[em.Name] {
+			*msgs = append(*msgs, em)
+			msgMap[em.Name] = true
+		}
+	}
+
+	enumMap := make(map[string]bool)
+	for _, e := range *enums {
+		enumMap[e.Name] = true
+	}
+	for _, ee := range existingSchema.Enums {
+		if !enumMap[ee.Name] {
+			*enums = append(*enums, ee)
+			enumMap[ee.Name] = true
+		}
 	}
 }
 
