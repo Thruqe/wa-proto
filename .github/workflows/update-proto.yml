@@ -1,0 +1,95 @@
+name: Update WAProto
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  schedule:
+    - cron: '0,30 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+
+      - name: Install dependencies
+        run: go mod download
+
+      - name: Run unit tests
+        run: go test -v ./...
+
+      - name: Build CLI binary
+        run: go build -v -o bin/wa-proto .
+
+  update:
+    if: >-
+      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: write
+      contents: write
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Setup Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+
+      - name: Build Go binary
+        run: go build -v -o bin/wa-proto .
+
+      - name: Fetch and generate latest WhatsApp proto
+        run: ./bin/wa-proto fetch
+
+      - name: Check for changes
+        id: changes
+        shell: bash
+        run: |
+          if git diff --quiet; then
+            echo "detected=false" >> "${GITHUB_OUTPUT}"
+          else
+            echo "detected=true" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Commit and release update
+        if: steps.changes.outputs.detected == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(grep "WhatsApp Version" WAProto.proto | cut -d":" -f2 | xargs)
+          tag="v${version}"
+          git add WAProto.proto
+          git commit -m "chore(release): ${tag}"
+          git tag "${tag}"
+          git push --atomic origin HEAD:main "${tag}"
+          gh workflow run publish.yml --ref "${tag}"
