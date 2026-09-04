@@ -1,7 +1,7 @@
 syntax = "proto3";
 package waproto;
 
-/// WhatsApp Version: 2.3000.1046829849
+/// WhatsApp Version: 2.3000.1046846055
 
 enum ACK {
 	CLOCK = 0;
