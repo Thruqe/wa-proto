@@ -128,21 +128,29 @@ func GenerateModular(schema *ast.ProtoSchema, outDir string) (*Report, error) {
 
 		targetFilePath := filepath.Join(targetDirPath, meta.File)
 
+		// Collect all types locally defined in this package
+		localTypes := make(map[string]bool)
+		for _, m := range msgs {
+			collectLocalTypes(m, localTypes)
+		}
+		for _, e := range enums {
+			localTypes[e.Name] = true
+		}
+
 		// Collect referenced types to compute needed imports
 		referencedTypes := make(map[string]bool)
 		for _, m := range msgs {
 			collectMessageTypes(m, referencedTypes)
 		}
 
-		// Calculate required imports
+		// Calculate required imports based on actual referenced external types
 		neededImports := make(map[string]bool)
-		// Include baseline default imports for this package
-		for _, imp := range meta.Imports {
-			neededImports[imp] = true
-		}
-
 		for t := range referencedTypes {
-			refPkg := catalog.LookupPackageForType(t)
+			cleanType := strings.TrimPrefix(t, ".")
+			if catalog.IsScalarType(cleanType) || localTypes[cleanType] {
+				continue
+			}
+			refPkg := catalog.LookupPackageForType(cleanType)
 			if refPkg != "" && refPkg != pkgDir {
 				if refMeta, ok := catalog.Packages[refPkg]; ok {
 					impPath := refMeta.Dir + "/" + refMeta.File
@@ -230,13 +238,18 @@ func collectMessageTypes(m *ast.MessageDef, acc map[string]bool) {
 }
 
 func isScalarType(t string) bool {
-	switch t {
-	case "double", "float", "int32", "int64", "uint32", "uint64",
-		"sint32", "sint64", "fixed32", "fixed64", "sfixed32", "sfixed64",
-		"bool", "string", "bytes":
-		return true
-	default:
-		return false
+	return catalog.IsScalarType(t)
+}
+
+func collectLocalTypes(m *ast.MessageDef, acc map[string]bool) {
+	acc[m.Name] = true
+	for _, ne := range m.NestedEnums {
+		acc[ne.Name] = true
+		acc[m.Name+"."+ne.Name] = true
+	}
+	for _, nm := range m.NestedMessages {
+		collectLocalTypes(nm, acc)
+		acc[m.Name+"."+nm.Name] = true
 	}
 }
 

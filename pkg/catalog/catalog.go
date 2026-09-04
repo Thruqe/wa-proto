@@ -1970,10 +1970,26 @@ func init() {
 	}
 }
 
+// IsScalarType returns true if the type is a primitive protobuf scalar.
+func IsScalarType(t string) bool {
+	switch strings.ToLower(t) {
+	case "double", "float", "int32", "int64", "uint32", "uint64",
+		"sint32", "sint64", "fixed32", "fixed64", "sfixed32", "sfixed64",
+		"bool", "string", "bytes":
+		return true
+	default:
+		return false
+	}
+}
+
 // LookupPackageForType finds the package directory for a given type name.
 // If the type is unknown, it attempts heuristic inference based on common prefixes.
 func LookupPackageForType(typeName string) string {
-	if pkg, ok := TypeToPackage[typeName]; ok {
+	clean := strings.TrimPrefix(typeName, ".")
+	if IsScalarType(clean) {
+		return ""
+	}
+	if pkg, ok := TypeToPackage[clean]; ok {
 		return pkg
 	}
 	if strings.HasPrefix(typeName, "Instamadillo") {
