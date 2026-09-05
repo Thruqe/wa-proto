@@ -2,12 +2,15 @@ package extractor
 
 import (
 	"fmt"
+	"regexp"
+	"sort"
 	"strings"
 
+	protoAst "github.com/Thruqe/wa-proto/pkg/ast"
+	"github.com/Thruqe/wa-proto/pkg/catalog"
 	"github.com/dop251/goja/ast"
 	"github.com/dop251/goja/parser"
 	"github.com/dop251/goja/token"
-	protoAst "github.com/Thruqe/wa-proto/pkg/ast"
 )
 
 // ModuleSchema represents the extracted protobuf definitions of a single module.
@@ -41,6 +44,27 @@ func (e *Extractor) ProcessSource(src string) error {
 
 	prog, err := parser.ParseFile(nil, "", patched, 0)
 	if err != nil {
+		// Some composite bundles separated by FB_PKG_DELIM may fail whole-file parse.
+		// Try splitting and parsing each part.
+		parts := strings.Split(patched, "/*FB_PKG_DELIM*/")
+		if len(parts) > 1 {
+			for _, part := range parts {
+				part = strings.TrimSpace(part)
+				if part == "" {
+					continue
+				}
+				if !strings.Contains(part, "Spec") && !strings.Contains(part, "internalSpec") {
+					continue
+				}
+				subProg, subErr := parser.ParseFile(nil, "", part, 0)
+				if subErr == nil {
+					for _, stmt := range subProg.Body {
+						e.inspectStatement(stmt)
+					}
+				}
+			}
+			return nil
+		}
 		return fmt.Errorf("parsing JS source: %w", err)
 	}
 
@@ -68,72 +92,170 @@ func (e *Extractor) inspectStatement(stmt ast.Statement) {
 		return
 	}
 
-	// First pass: collect local enums (both var and let/const declarations)
+	// First pass: collect local enums and track intermediate spec containers.
 	enums := make(map[string]*protoAst.EnumDef)
+	specContainers := make(map[string]bool)
+
 	for _, s := range fn.Body.List {
 		switch node := s.(type) {
 		case *ast.VariableStatement:
 			for _, decl := range node.List {
-				if ident, ok := decl.Target.(*ast.Identifier); ok {
-					if obj, ok := decl.Initializer.(*ast.ObjectLiteral); ok {
-						if enumDef := parseEnumObject(ident.Name.String(), obj); enumDef != nil {
-							enums[ident.Name.String()] = enumDef
-						}
+				ident, ok := decl.Target.(*ast.Identifier)
+				if !ok {
+					continue
+				}
+				varName := ident.Name.String()
+				if decl.Initializer == nil {
+					continue
+				}
+
+				switch init := decl.Initializer.(type) {
+				case *ast.ObjectLiteral:
+					if len(init.Value) == 0 {
+						specContainers[varName] = true
+					} else if enumDef := parseEnumObject(varName, init); enumDef != nil {
+						enums[varName] = enumDef
+					}
+				case *ast.CallExpression:
+					if enumDef := parseInternalEnumCall(varName, init); enumDef != nil {
+						enums[varName] = enumDef
 					}
 				}
 			}
 		case *ast.LexicalDeclaration:
 			for _, decl := range node.List {
-				if ident, ok := decl.Target.(*ast.Identifier); ok {
-					if obj, ok := decl.Initializer.(*ast.ObjectLiteral); ok {
-						if enumDef := parseEnumObject(ident.Name.String(), obj); enumDef != nil {
-							enums[ident.Name.String()] = enumDef
-						}
+				ident, ok := decl.Target.(*ast.Identifier)
+				if !ok {
+					continue
+				}
+				varName := ident.Name.String()
+				if decl.Initializer == nil {
+					continue
+				}
+
+				switch init := decl.Initializer.(type) {
+				case *ast.ObjectLiteral:
+					if len(init.Value) == 0 {
+						specContainers[varName] = true
+					} else if enumDef := parseEnumObject(varName, init); enumDef != nil {
+						enums[varName] = enumDef
+					}
+				case *ast.CallExpression:
+					if enumDef := parseInternalEnumCall(varName, init); enumDef != nil {
+						enums[varName] = enumDef
 					}
 				}
 			}
 		}
 	}
 
-	// Second pass: collect message specs and module assignments
+	// Second pass: collect assignments (including minified SequenceExpressions).
+	containerNames := make(map[string]string)
+	containerSpecs := make(map[string]*ast.ObjectLiteral)
+
 	var messages []*protoAst.MessageDef
 	var exportedEnums []*protoAst.EnumDef
 
 	for _, s := range fn.Body.List {
-		switch node := s.(type) {
-		case *ast.ExpressionStatement:
-			if assign, ok := node.Expression.(*ast.AssignExpression); ok {
-				if mem, ok := assign.Left.(*ast.DotExpression); ok {
-					propName := mem.Identifier.Name.String()
+		exprStmt, ok := s.(*ast.ExpressionStatement)
+		if !ok {
+			continue
+		}
 
-					// Check if this exports an enum: f.EnumName = EnumName
-					if rIdent, ok := assign.Right.(*ast.Identifier); ok {
-						if enumDef, ok := enums[rIdent.Name.String()]; ok {
-							enumDef.Name = propName
-							exportedEnums = append(exportedEnums, enumDef)
-							continue
+		assigns := collectAssignments(exprStmt.Expression)
+		for _, assign := range assigns {
+			mem, ok := assign.Left.(*ast.DotExpression)
+			if !ok {
+				continue
+			}
+
+			propName := mem.Identifier.Name.String()
+
+			// Check left-hand side container properties: h.name = "..." or h.internalSpec = { ... }
+			if lhsIdent, ok := mem.Left.(*ast.Identifier); ok {
+				varName := lhsIdent.Name.String()
+				switch propName {
+				case "name":
+					if strLit, ok := assign.Right.(*ast.StringLiteral); ok {
+						containerNames[varName] = strLit.Value.String()
+						specContainers[varName] = true
+					}
+					continue
+				case "internalSpec":
+					if obj, ok := assign.Right.(*ast.ObjectLiteral); ok {
+						containerSpecs[varName] = obj
+						specContainers[varName] = true
+					}
+					continue
+				}
+			}
+
+			// Left side is module export (e.g. l.XxxSpec = ... or f.XxxSpec = ...)
+			switch rhs := assign.Right.(type) {
+			case *ast.Identifier:
+				rhsName := rhs.Name.String()
+
+				// NEW format: l.MessageNameSpec = h
+				if strings.HasSuffix(propName, "Spec") && specContainers[rhsName] {
+					msgName := containerNames[rhsName]
+					if msgName == "" {
+						msgName = strings.TrimSuffix(propName, "Spec")
+					}
+					if specObj, ok := containerSpecs[rhsName]; ok {
+						msgDef := parseMessageSpecObject(msgName, specObj, enums, containerNames)
+						if msgDef != nil {
+							messages = append(messages, msgDef)
 						}
 					}
+					continue
+				}
 
-					// Check if this is an inline enum assignment: f.EnumName = { ... }
-					if obj, ok := assign.Right.(*ast.ObjectLiteral); ok && !strings.HasSuffix(propName, "Spec") {
-						if enumDef := parseEnumObject(propName, obj); enumDef != nil {
-							exportedEnums = append(exportedEnums, enumDef)
-							continue
-						}
+				// Enum export: f.EnumName = localVar or l.EnumName = localVar
+				if enumDef, ok := enums[rhsName]; ok {
+					enumDef.Name = propName
+					exportedEnums = append(exportedEnums, enumDef)
+					continue
+				}
+
+			case *ast.ObjectLiteral:
+				// OLD format: f.MessageNameSpec = { ... }
+				if strings.HasSuffix(propName, "Spec") {
+					msgName := strings.TrimSuffix(propName, "Spec")
+					msgDef := parseMessageSpecObject(msgName, rhs, enums, containerNames)
+					if msgDef != nil {
+						messages = append(messages, msgDef)
 					}
+					continue
+				}
 
-					// Check if this is a message spec: f.MessageNameSpec = { ... }
-					if strings.HasSuffix(propName, "Spec") {
-						msgName := strings.TrimSuffix(propName, "Spec")
-						if obj, ok := assign.Right.(*ast.ObjectLiteral); ok {
-							msgDef := parseMessageSpecObject(msgName, obj, enums)
-							if msgDef != nil {
-								messages = append(messages, msgDef)
-							}
-						}
+				// OLD format enum: f.EnumName = { ... } (inline enum)
+				if !strings.HasSuffix(propName, "Spec") {
+					if enumDef := parseEnumObject(propName, rhs); enumDef != nil {
+						exportedEnums = append(exportedEnums, enumDef)
+						continue
 					}
 				}
+			}
+		}
+	}
+
+	// Capture any containerSpecs with names that were not explicitly exported on module object
+	for varName, specObj := range containerSpecs {
+		msgName := containerNames[varName]
+		if msgName == "" {
+			continue
+		}
+		found := false
+		for _, m := range messages {
+			if m.Name == msgName {
+				found = true
+				break
+			}
+		}
+		if !found {
+			msgDef := parseMessageSpecObject(msgName, specObj, enums, containerNames)
+			if msgDef != nil {
+				messages = append(messages, msgDef)
 			}
 		}
 	}
@@ -152,20 +274,75 @@ func (e *Extractor) inspectStatement(stmt ast.Statement) {
 	}
 }
 
+// collectAssignments recursively gathers all AssignExpression nodes from an expression,
+// properly unpacking SequenceExpressions (comma operator) and chained assignments.
+func collectAssignments(expr ast.Expression) []*ast.AssignExpression {
+	var list []*ast.AssignExpression
+	var walk func(e ast.Expression)
+	walk = func(e ast.Expression) {
+		if e == nil {
+			return
+		}
+		switch node := e.(type) {
+		case *ast.AssignExpression:
+			list = append(list, node)
+			walk(node.Right)
+			walk(node.Left)
+		case *ast.SequenceExpression:
+			for _, elem := range node.Sequence {
+				walk(elem)
+			}
+		case *ast.CallExpression:
+			walk(node.Callee)
+			for _, arg := range node.ArgumentList {
+				walk(arg)
+			}
+		}
+	}
+	walk(expr)
+	return list
+}
+
+// parseInternalEnumCall parses enum definitions from function calls like $InternalEnum({KEY: 0, ...}).
+func parseInternalEnumCall(name string, call *ast.CallExpression) *protoAst.EnumDef {
+	if len(call.ArgumentList) != 1 {
+		return nil
+	}
+	objArg, ok := call.ArgumentList[0].(*ast.ObjectLiteral)
+	if !ok {
+		return nil
+	}
+	return parseEnumObject(name, objArg)
+}
+
+var (
+	validIdentifierRe = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
+	validProtoTypeRe  = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*(\.[a-zA-Z_][a-zA-Z0-9_]*)*$`)
+)
+
 func parseEnumObject(name string, obj *ast.ObjectLiteral) *protoAst.EnumDef {
+	if name == "" {
+		return nil
+	}
 	var values []*protoAst.EnumValueDef
+	seenKeys := make(map[string]bool)
 	for _, prop := range obj.Value {
 		if pk, ok := prop.(*ast.PropertyKeyed); ok {
 			key := getPropKey(pk.Key)
-			if num, ok := getNumber(pk.Value); ok {
-				values = append(values, &protoAst.EnumValueDef{
-					Name: key,
-					ID:   num,
-				})
-			} else {
-				// Not a numeric enum
+			if !validIdentifierRe.MatchString(key) || seenKeys[key] {
 				return nil
 			}
+			num, ok := getNumber(pk.Value)
+			if !ok || num < -2147483648 || num > 2147483647 {
+				return nil
+			}
+			seenKeys[key] = true
+			values = append(values, &protoAst.EnumValueDef{
+				Name: key,
+				ID:   num,
+			})
+		} else {
+			return nil
 		}
 	}
 	if len(values) == 0 {
@@ -177,7 +354,7 @@ func parseEnumObject(name string, obj *ast.ObjectLiteral) *protoAst.EnumDef {
 	}
 }
 
-func parseMessageSpecObject(msgName string, obj *ast.ObjectLiteral, localEnums map[string]*protoAst.EnumDef) *protoAst.MessageDef {
+func parseMessageSpecObject(msgName string, obj *ast.ObjectLiteral, localEnums map[string]*protoAst.EnumDef, containerNames map[string]string) *protoAst.MessageDef {
 	msgDef := &protoAst.MessageDef{
 		Name: msgName,
 	}
@@ -224,7 +401,7 @@ func parseMessageSpecObject(msgName string, obj *ast.ObjectLiteral, localEnums m
 			continue
 		}
 
-		fieldType, rule, packed, isMap, mapKey, mapVal := parseTypeAndFlags(arr.Value[1], arr.Value, localEnums)
+		fieldType, rule, packed, isMap, mapKey, mapVal := parseTypeAndFlags(arr.Value[1], arr.Value, localEnums, containerNames)
 
 		msgDef.Fields = append(msgDef.Fields, &protoAst.FieldDef{
 			Name:     key,
@@ -270,7 +447,7 @@ func parseMessageSpecObject(msgName string, obj *ast.ObjectLiteral, localEnums m
 	return msgDef
 }
 
-func parseTypeAndFlags(typeExpr ast.Expression, allElements []ast.Expression, localEnums map[string]*protoAst.EnumDef) (fieldType, rule string, packed, isMap bool, mapKey, mapVal string) {
+func parseTypeAndFlags(typeExpr ast.Expression, allElements []ast.Expression, localEnums map[string]*protoAst.EnumDef, containerNames map[string]string) (fieldType, rule string, packed, isMap bool, mapKey, mapVal string) {
 	rule = "optional"
 	var parts []ast.Expression
 	unwrapBinaryOr(typeExpr, &parts)
@@ -307,8 +484,8 @@ func parseTypeAndFlags(typeExpr ast.Expression, allElements []ast.Expression, lo
 		isMap = true
 		if len(allElements) > 2 {
 			if arr, ok := allElements[2].(*ast.ArrayLiteral); ok && len(arr.Value) >= 2 {
-				mapKey = getTypeNameFromExpr(arr.Value[0])
-				mapVal = getTypeNameFromExpr(arr.Value[1])
+				mapKey = resolveTypeName(arr.Value[0], localEnums, containerNames)
+				mapVal = resolveTypeName(arr.Value[1], localEnums, containerNames)
 			}
 		}
 		fieldType = fmt.Sprintf("map<%s, %s>", mapKey, mapVal)
@@ -316,7 +493,7 @@ func parseTypeAndFlags(typeExpr ast.Expression, allElements []ast.Expression, lo
 
 	case "enum", "message":
 		if len(allElements) > 2 {
-			target := getTypeNameFromExpr(allElements[2])
+			target := resolveTypeName(allElements[2], localEnums, containerNames)
 			if target != "" {
 				fieldType = target
 				return
@@ -335,19 +512,45 @@ func parseTypeAndFlags(typeExpr ast.Expression, allElements []ast.Expression, lo
 	}
 }
 
-func getTypeNameFromExpr(expr ast.Expression) string {
+func resolveTypeName(expr ast.Expression, localEnums map[string]*protoAst.EnumDef, containerNames map[string]string) string {
 	switch e := expr.(type) {
 	case *ast.Identifier:
 		name := e.Name.String()
-		return strings.TrimSuffix(name, "Spec")
+		if cName, ok := containerNames[name]; ok && cName != "" {
+			return cleanTypeName(cName)
+		}
+		if enumDef, ok := localEnums[name]; ok && enumDef.Name != "" {
+			return cleanTypeName(enumDef.Name)
+		}
+		return cleanTypeName(name)
 	case *ast.DotExpression:
 		name := e.Identifier.Name.String()
-		return strings.TrimSuffix(name, "Spec")
+		return cleanTypeName(name)
 	case *ast.StringLiteral:
-		return strings.TrimSuffix(e.Value.String(), "Spec")
+		return cleanTypeName(e.Value.String())
 	default:
 		return ""
 	}
+}
+
+func cleanTypeName(name string) string {
+	name = strings.TrimSuffix(name, "Spec")
+	name = strings.ReplaceAll(name, "$", ".")
+	if catalog.IsScalarType(name) {
+		return strings.ToLower(name)
+	}
+	if !validProtoTypeRe.MatchString(name) {
+		return ""
+	}
+	return name
+}
+
+func unnestName(name string) string {
+	idx := strings.LastIndex(name, "$")
+	if idx >= 0 {
+		return name[idx+1:]
+	}
+	return name
 }
 
 func unwrapBinaryOr(expr ast.Expression, acc *[]ast.Expression) {
@@ -398,4 +601,72 @@ func getPropKey(expr ast.Expression) string {
 	default:
 		return ""
 	}
+}
+
+// OrganizeHierarchy groups extracted messages and enums that have '$' in their names
+// into a proper nested hierarchy under their respective parent messages.
+func OrganizeHierarchy(messages []*protoAst.MessageDef, enums []*protoAst.EnumDef) ([]*protoAst.MessageDef, []*protoAst.EnumDef) {
+	msgMap := make(map[string]*protoAst.MessageDef)
+	for _, m := range messages {
+		msgMap[m.Name] = m
+	}
+
+	// 1. Nest enums with $ into their parent message
+	var topEnums []*protoAst.EnumDef
+	for _, e := range enums {
+		idx := strings.LastIndex(e.Name, "$")
+		if idx >= 0 {
+			parentPath := e.Name[:idx]
+			childName := e.Name[idx+1:]
+			if parentMsg, ok := msgMap[parentPath]; ok {
+				e.Name = childName
+				parentMsg.NestedEnums = append(parentMsg.NestedEnums, e)
+				continue
+			}
+		}
+		topEnums = append(topEnums, e)
+	}
+
+	// 2. Nest messages with $ into their parent message
+	type msgWithDepth struct {
+		m        *protoAst.MessageDef
+		fullName string
+		depth    int
+	}
+	var msgList []msgWithDepth
+	for _, m := range messages {
+		msgList = append(msgList, msgWithDepth{
+			m:        m,
+			fullName: m.Name,
+			depth:    strings.Count(m.Name, "$"),
+		})
+	}
+	sort.Slice(msgList, func(i, j int) bool {
+		return msgList[i].depth > msgList[j].depth
+	})
+
+	nestedSet := make(map[string]bool)
+	for _, item := range msgList {
+		if item.depth == 0 {
+			continue
+		}
+		idx := strings.LastIndex(item.fullName, "$")
+		parentPath := item.fullName[:idx]
+		childName := item.fullName[idx+1:]
+
+		if parentMsg, ok := msgMap[parentPath]; ok {
+			item.m.Name = childName
+			parentMsg.NestedMessages = append(parentMsg.NestedMessages, item.m)
+			nestedSet[item.fullName] = true
+		}
+	}
+
+	var topMessages []*protoAst.MessageDef
+	for _, item := range msgList {
+		if !nestedSet[item.fullName] {
+			topMessages = append(topMessages, item.m)
+		}
+	}
+
+	return topMessages, topEnums
 }

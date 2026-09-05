@@ -140,15 +140,44 @@ func cmdFetch(args []string) {
 		}
 	}
 
-	// Merge all modules into a unified ProtoSchema
-	schema := &ast.ProtoSchema{
-		Syntax:  "proto3",
-		Package: "waproto",
-		Version: res.Version,
-	}
+	// Merge and deduplicate all modules into a unified ProtoSchema
+	var rawMessages []*ast.MessageDef
+	var rawEnums []*ast.EnumDef
 	for _, mod := range ext.Modules {
-		schema.Messages = append(schema.Messages, mod.Messages...)
-		schema.Enums = append(schema.Enums, mod.Enums...)
+		rawMessages = append(rawMessages, mod.Messages...)
+		rawEnums = append(rawEnums, mod.Enums...)
+	}
+
+	msgMap := make(map[string]*ast.MessageDef)
+	for _, m := range rawMessages {
+		if _, ok := msgMap[m.Name]; !ok {
+			msgMap[m.Name] = m
+		}
+	}
+	var dedupMessages []*ast.MessageDef
+	for _, m := range msgMap {
+		dedupMessages = append(dedupMessages, m)
+	}
+
+	enumMap := make(map[string]*ast.EnumDef)
+	for _, e := range rawEnums {
+		if _, ok := enumMap[e.Name]; !ok {
+			enumMap[e.Name] = e
+		}
+	}
+	var dedupEnums []*ast.EnumDef
+	for _, e := range enumMap {
+		dedupEnums = append(dedupEnums, e)
+	}
+
+	topMessages, topEnums := extractor.OrganizeHierarchy(dedupMessages, dedupEnums)
+
+	schema := &ast.ProtoSchema{
+		Syntax:   "proto3",
+		Package:  "waproto",
+		Version:  res.Version,
+		Messages: topMessages,
+		Enums:    topEnums,
 	}
 
 	if len(schema.Messages) >= 50 {

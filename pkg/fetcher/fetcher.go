@@ -2,7 +2,6 @@ package fetcher
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,16 +15,30 @@ import (
 
 const (
 	BaseURL    = "https://web.whatsapp.com"
-	UserAgent  = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
-	MaxWorkers = 8
+	CDNURL     = "https://static.whatsapp.net"
+	MaxWorkers = 16
 )
 
+// userAgents cycles through different UA strings to reduce bot-detection fingerprinting.
+var userAgents = []string{
+	"Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0",
+	"Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:127.0) Gecko/20100101 Firefox/127.0",
+	"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+}
+
 var (
-	scriptSrcRe      = regexp.MustCompile(`<script[^>]+src=["']([^"']+)["']`)
-	preloadRe        = regexp.MustCompile(`<link[^>]+(?:rel=["'](?:preload|modulepreload)["'][^>]+as=["']script["']|as=["']script["'][^>]+rel=["'](?:preload|modulepreload)["'])[^>]+href=["']([^"']+)["']`)
-	manifestRe       = regexp.MustCompile(`assets-manifest-([0-9.]+)\.json`)
-	clientRevisionRe = regexp.MustCompile(`client_revision\\?":([0-9.]+)`)
-	versionStrRe     = regexp.MustCompile(`(?:appVersion:|VERSION_STR=)"([0-9.]+)"`)
+	// Script src / link href regexps — covers both web.whatsapp.com and static.whatsapp.net
+	scriptSrcRe  = regexp.MustCompile(`<script[^>]+\bsrc=["']([^"']+)["']`)
+	preloadHref  = regexp.MustCompile(`<link[^>]+\bhref=["']([^"']+\.m?js[^"']*)["']`)
+	// In-text JS URL finder (same regex as fetch.js jsInTextRegex)
+	jsInTextRe   = regexp.MustCompile(`(?:https?:)?//[^\s"'` + "`" + `<>]+?\.m?js(?:[?#][^\s"'` + "`" + `<>]*)?|(?:/|\./|\.\./)[^\s"'` + "`" + `<>]+?\.m?js(?:[?#][^\s"'` + "`" + `<>]*)?`)
+	// btmanifest attribute carries the WA client revision: data-btmanifest="1046904178_main"
+	btManifestRe = regexp.MustCompile(`data-btmanifest=["']([0-9]+)_`)
+	// Version string inside bundle JS
+	versionStrRe = regexp.MustCompile(`(?:appVersion:|VERSION_STR=)"([0-9.]+)"`)
+	// serviceworker.js / sw.js patterns
+	manifestRe   = regexp.MustCompile(`assets-manifest-([0-9.]+)\.json`)
+	clientRevRe  = regexp.MustCompile(`client_revision\\?":\s*([0-9]+)`)
 )
 
 // BundleResult contains the fetched WhatsApp Web version and downloaded bundle sources.
@@ -44,76 +57,35 @@ func FetchBundles(ctx context.Context, client *http.Client) (*BundleResult, erro
 	}
 
 	result := &BundleResult{}
-
-	// 1. Fetch main page HTML
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, BaseURL+"/", nil)
-	if err != nil {
-		return nil, err
-	}
-	setBrowserHeaders(req)
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed fetching whatsapp web: %w", err)
-	}
-	defer resp.Body.Close()
-
-	htmlBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("reading whatsapp web html: %w", err)
-	}
-
-	// 2. Discover script URLs
 	urlSet := make(map[string]bool)
 
-	for _, m := range scriptSrcRe.FindAllSubmatch(htmlBody, -1) {
-		if len(m) > 1 {
-			u := resolveURL(string(m[1]))
-			if isAllowedBundle(u) {
-				urlSet[u] = true
-			}
-		}
-	}
-	for _, m := range preloadRe.FindAllSubmatch(htmlBody, -1) {
-		if len(m) > 1 {
-			u := resolveURL(string(m[1]))
-			if isAllowedBundle(u) {
-				urlSet[u] = true
-			}
-		}
+	// ── Step 1: Fetch the main page HTML with proper document-navigation headers ──
+	htmlBody, err := fetchHTML(ctx, client, BaseURL+"/")
+	if err != nil {
+		return nil, fmt.Errorf("failed fetching WhatsApp Web main page: %w", err)
 	}
 
-	// 3. Check serviceworker.js / sw.js for client_revision and asset manifests
-	for _, swPath := range []string{"/sw.js", "/serviceworker.js"} {
-		swReq, _ := http.NewRequestWithContext(ctx, http.MethodGet, BaseURL+swPath, nil)
-		setBrowserHeaders(swReq)
-		if swResp, err := client.Do(swReq); err == nil {
-			swData, _ := io.ReadAll(swResp.Body)
-			swResp.Body.Close()
+	// Extract version from btmanifest attribute (most reliable from HTML)
+	if m := btManifestRe.FindSubmatch(htmlBody); len(m) > 1 {
+		result.Version = fmt.Sprintf("2.3000.%s", string(m[1]))
+	}
 
-			if m := clientRevisionRe.FindSubmatch(swData); len(m) > 1 {
-				result.Version = fmt.Sprintf("2.3000.%s", string(m[1]))
-			}
+	// ── Step 2: Find all JS bundle URLs referenced in the HTML ──
+	addURLsFromHTML(htmlBody, urlSet)
 
-			// Check for asset manifest
-			if mm := manifestRe.FindSubmatch(swData); len(mm) > 1 {
-				manifestURL := fmt.Sprintf("%s/assets-manifest-%s.json", BaseURL, string(mm[1]))
-				mReq, _ := http.NewRequestWithContext(ctx, http.MethodGet, manifestURL, nil)
-				setBrowserHeaders(mReq)
-				if mResp, err := client.Do(mReq); err == nil {
-					var manifest map[string]any
-					if err := json.NewDecoder(mResp.Body).Decode(&manifest); err == nil {
-						for filename := range manifest {
-							if strings.HasSuffix(filename, ".js") {
-								u := fmt.Sprintf("%s/%s", BaseURL, filename)
-								urlSet[u] = true
-							}
-						}
-					}
-					mResp.Body.Close()
-				}
-			}
+	// ── Step 3: Check serviceworker / sw.js for asset manifest and more bundles ──
+	fetchServiceWorkerBundles(ctx, client, result, urlSet)
+
+	// ── Step 4: Scan inline <script> text for additional JS URLs ──
+	for _, match := range jsInTextRe.FindAll(htmlBody, -1) {
+		u := resolveURL(string(match))
+		if isAllowedBundle(u) {
+			urlSet[u] = true
 		}
+	}
+
+	if len(urlSet) == 0 {
+		return nil, fmt.Errorf("no JavaScript bundle URLs discovered from %s", BaseURL)
 	}
 
 	var urls []string
@@ -123,15 +95,12 @@ func FetchBundles(ctx context.Context, client *http.Client) (*BundleResult, erro
 	sort.Strings(urls)
 	result.URLs = urls
 
-	if len(urls) == 0 {
-		return nil, fmt.Errorf("no JavaScript bundle URLs discovered from %s", BaseURL)
-	}
-
-	// 4. Download bundles concurrently
+	// ── Step 5: Download all bundles concurrently ──
 	sources := make([]string, len(urls))
 	var wg sync.WaitGroup
 	errCh := make(chan error, len(urls))
 	sem := make(chan struct{}, MaxWorkers)
+	var versionOnce sync.Once
 
 	for i, bundleURL := range urls {
 		wg.Add(1)
@@ -147,10 +116,12 @@ func FetchBundles(ctx context.Context, client *http.Client) (*BundleResult, erro
 			}
 			sources[idx] = string(data)
 
-			// Try to extract version if not found yet
+			// Capture version from bundle JS as fallback
 			if result.Version == "" {
 				if vm := versionStrRe.FindSubmatch(data); len(vm) > 1 {
-					result.Version = string(vm[1])
+					versionOnce.Do(func() {
+						result.Version = string(vm[1])
+					})
 				}
 			}
 		}(i, bundleURL)
@@ -160,7 +131,6 @@ func FetchBundles(ctx context.Context, client *http.Client) (*BundleResult, erro
 	close(errCh)
 
 	if len(errCh) > 0 {
-		// Log errors but return available sources if any
 		for e := range errCh {
 			fmt.Printf("Warning: %v\n", e)
 		}
@@ -170,63 +140,206 @@ func FetchBundles(ctx context.Context, client *http.Client) (*BundleResult, erro
 	return result, nil
 }
 
-func setBrowserHeaders(req *http.Request) {
-	req.Header.Set("User-Agent", UserAgent)
+// addURLsFromHTML extracts all JS bundle URLs from WhatsApp Web HTML.
+// Bundles are now served from static.whatsapp.net via rsrc.php paths.
+func addURLsFromHTML(html []byte, urlSet map[string]bool) {
+	// <script src="...">
+	for _, m := range scriptSrcRe.FindAllSubmatch(html, -1) {
+		if len(m) > 1 {
+			u := resolveURL(string(m[1]))
+			if isAllowedBundle(u) {
+				urlSet[u] = true
+			}
+		}
+	}
+
+	// <link rel="preload/modulepreload/prefetch" href="...">
+	for _, m := range preloadHref.FindAllSubmatch(html, -1) {
+		if len(m) > 1 {
+			u := resolveURL(string(m[1]))
+			if isAllowedBundle(u) {
+				urlSet[u] = true
+			}
+		}
+	}
+}
+
+// fetchServiceWorkerBundles checks sw.js / serviceworker.js for asset manifests.
+func fetchServiceWorkerBundles(ctx context.Context, client *http.Client, result *BundleResult, urlSet map[string]bool) {
+	for _, swPath := range []string{"/sw.js", "/serviceworker.js"} {
+		swData, err := fetchScript(ctx, client, BaseURL+swPath)
+		if err != nil || len(swData) == 0 {
+			continue
+		}
+
+		// Extract version from client_revision
+		if result.Version == "" {
+			if m := clientRevRe.FindSubmatch(swData); len(m) > 1 {
+				result.Version = fmt.Sprintf("2.3000.%s", string(m[1]))
+			}
+		}
+
+		// Find assets-manifest-{ver}.json references
+		for _, mm := range manifestRe.FindAllSubmatch(swData, -1) {
+			if len(mm) < 2 {
+				continue
+			}
+			manifestURL := fmt.Sprintf("%s/assets-manifest-%s.json", BaseURL, string(mm[1]))
+			fetchManifestBundles(ctx, client, manifestURL, urlSet)
+		}
+
+		// Also scan sw.js text for inline JS URLs
+		for _, match := range jsInTextRe.FindAll(swData, -1) {
+			u := resolveURL(string(match))
+			if isAllowedBundle(u) {
+				urlSet[u] = true
+			}
+		}
+	}
+}
+
+// fetchManifestBundles fetches an assets-manifest JSON and adds all .js entries.
+func fetchManifestBundles(ctx context.Context, client *http.Client, manifestURL string, urlSet map[string]bool) {
+	data, err := fetchScript(ctx, client, manifestURL)
+	if err != nil || len(data) == 0 {
+		return
+	}
+	// Quick string scan — avoid full JSON parsing for speed
+	jsPathRe := regexp.MustCompile(`"([^"]+\.m?js)"`)
+	for _, m := range jsPathRe.FindAllSubmatch(data, -1) {
+		if len(m) > 1 {
+			raw := string(m[1])
+			// Manifest keys are bare paths like "app.abc123.js" or full URLs
+			var u string
+			if strings.HasPrefix(raw, "http") {
+				u = raw
+			} else if strings.HasPrefix(raw, "/") {
+				u = BaseURL + raw
+			} else {
+				u = BaseURL + "/" + raw
+			}
+			if isAllowedBundle(u) {
+				urlSet[u] = true
+			}
+		}
+	}
+}
+
+// fetchHTML performs an HTTP GET with browser document-navigation headers (used for main HTML page).
+func fetchHTML(ctx context.Context, client *http.Client, rawURL string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	setDocumentHeaders(req)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("HTTP %d from %s", resp.StatusCode, rawURL)
+	}
+
+	return io.ReadAll(resp.Body)
+}
+
+// fetchScript performs an HTTP GET with browser script-fetch headers.
+func fetchScript(ctx context.Context, client *http.Client, rawURL string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	setScriptHeaders(req)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("HTTP %d from %s", resp.StatusCode, rawURL)
+	}
+
+	return io.ReadAll(resp.Body)
+}
+
+// setDocumentHeaders sets headers that mimic a real browser navigating to a page.
+func setDocumentHeaders(req *http.Request) {
+	req.Header.Set("User-Agent", userAgents[0])
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.5")
+	req.Header.Set("Upgrade-Insecure-Requests", "1")
+	req.Header.Set("Sec-Fetch-Dest", "document")
+	req.Header.Set("Sec-Fetch-Mode", "navigate")
+	req.Header.Set("Sec-Fetch-Site", "none")
+	req.Header.Set("Sec-Fetch-User", "?1")
+}
+
+// setScriptHeaders sets headers that mimic a browser fetching a script resource.
+func setScriptHeaders(req *http.Request) {
+	req.Header.Set("User-Agent", userAgents[0])
 	req.Header.Set("Accept", "*/*")
-	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.5")
 	req.Header.Set("Sec-Fetch-Dest", "script")
 	req.Header.Set("Sec-Fetch-Mode", "no-cors")
-	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	req.Header.Set("Sec-Fetch-Site", "cross-site")
 	req.Header.Set("Referer", BaseURL+"/")
 }
 
 func resolveURL(raw string) string {
 	raw = strings.TrimSpace(raw)
+	// Escaped slashes (from JSON-within-HTML)
+	raw = strings.ReplaceAll(raw, `\/`, "/")
 	if strings.HasPrefix(raw, "//") {
 		return "https:" + raw
 	}
 	if strings.HasPrefix(raw, "/") {
+		// Could be web.whatsapp.com or static.whatsapp.net — default to BaseURL
 		return BaseURL + raw
 	}
 	return raw
 }
 
+// isAllowedBundle returns true if the URL points to a WhatsApp JS bundle.
+// Bundles are served from web.whatsapp.com and static.whatsapp.net.
 func isAllowedBundle(rawURL string) bool {
+	if rawURL == "" {
+		return false
+	}
+	// Skip data: URIs
+	if strings.HasPrefix(rawURL, "data:") {
+		return false
+	}
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
 		return false
 	}
 	host := strings.ToLower(parsed.Hostname())
-	if host == "web.whatsapp.com" || host == "static.whatsapp.net" || strings.HasSuffix(host, ".whatsapp.net") {
-		return strings.HasSuffix(parsed.Path, ".js")
+	allowed := host == "static.whatsapp.net" || strings.HasSuffix(host, ".whatsapp.net")
+	if !allowed {
+		return false
 	}
-	return false
+	// Must end with .js or .mjs (ignoring query/fragment)
+	path := parsed.Path
+	return strings.HasSuffix(path, ".js") || strings.HasSuffix(path, ".mjs")
 }
 
 func downloadWithRetry(ctx context.Context, client *http.Client, rawURL string, retries int) ([]byte, error) {
 	var lastErr error
 	for attempt := 1; attempt <= retries; attempt++ {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
-		if err != nil {
-			return nil, err
+		data, err := fetchScript(ctx, client, rawURL)
+		if err == nil && len(data) > 0 {
+			return data, nil
 		}
-		setBrowserHeaders(req)
-
-		resp, err := client.Do(req)
-		if err == nil && resp.StatusCode == http.StatusOK {
-			data, readErr := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			if readErr == nil && len(data) > 0 {
-				return data, nil
-			}
-			lastErr = readErr
-		} else if err != nil {
+		if err != nil {
 			lastErr = err
 		} else {
-			lastErr = fmt.Errorf("HTTP status %d", resp.StatusCode)
-			resp.Body.Close()
+			lastErr = fmt.Errorf("empty response")
 		}
-
 		time.Sleep(time.Duration(attempt*300) * time.Millisecond)
 	}
 	return nil, lastErr
