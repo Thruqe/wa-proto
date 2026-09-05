@@ -151,7 +151,7 @@ func cmdFetch(args []string) {
 		schema.Enums = append(schema.Enums, mod.Enums...)
 	}
 
-	if len(schema.Messages) > 0 || len(schema.Enums) > 0 {
+	if len(schema.Messages) >= 50 {
 		fmt.Printf("✓ Extracted %d messages and %d enums from %d modules\n",
 			len(schema.Messages), len(schema.Enums), len(ext.Modules))
 
@@ -171,7 +171,8 @@ func cmdFetch(args []string) {
 			}
 		}
 	} else {
-		fmt.Println("⚠️ Note: Live bundle discovery completed, but no internalSpec definitions found in downloaded subset.")
+		fmt.Fprintf(os.Stderr, "⚠️ Warning: Live bundle extraction yielded only %d messages and %d enums (threshold >= 50). Existing schema preserved.\n", len(schema.Messages), len(schema.Enums))
+		os.Exit(1)
 	}
 }
 

@@ -80,6 +80,17 @@ jobs:
             echo "detected=true" >> "${GITHUB_OUTPUT}"
           fi
 
+      - name: Validate WAProto.proto
+        if: steps.changes.outputs.detected == 'true'
+        shell: bash
+        run: |
+          msg_count=$(grep -c "^message " WAProto.proto || true)
+          echo "Found $msg_count message definitions in WAProto.proto"
+          if [ "$msg_count" -lt 50 ]; then
+            echo "::error::WAProto.proto contains only $msg_count messages (minimum 50 required). Aborting release."
+            exit 1
+          fi
+
       - name: Commit and release update
         if: steps.changes.outputs.detected == 'true'
         shell: bash
