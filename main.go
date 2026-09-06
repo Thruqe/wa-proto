@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/Thruqe/wa-proto/pkg/ast"
@@ -141,9 +142,16 @@ func cmdFetch(args []string) {
 	}
 
 	// Merge and deduplicate all modules into a unified ProtoSchema
+	var modNames []string
+	for name := range ext.Modules {
+		modNames = append(modNames, name)
+	}
+	sort.Strings(modNames)
+
 	var rawMessages []*ast.MessageDef
 	var rawEnums []*ast.EnumDef
-	for _, mod := range ext.Modules {
+	for _, name := range modNames {
+		mod := ext.Modules[name]
 		rawMessages = append(rawMessages, mod.Messages...)
 		rawEnums = append(rawEnums, mod.Enums...)
 	}
@@ -158,6 +166,9 @@ func cmdFetch(args []string) {
 	for _, m := range msgMap {
 		dedupMessages = append(dedupMessages, m)
 	}
+	sort.Slice(dedupMessages, func(i, j int) bool {
+		return dedupMessages[i].Name < dedupMessages[j].Name
+	})
 
 	enumMap := make(map[string]*ast.EnumDef)
 	for _, e := range rawEnums {
@@ -169,6 +180,9 @@ func cmdFetch(args []string) {
 	for _, e := range enumMap {
 		dedupEnums = append(dedupEnums, e)
 	}
+	sort.Slice(dedupEnums, func(i, j int) bool {
+		return dedupEnums[i].Name < dedupEnums[j].Name
+	})
 
 	topMessages, topEnums := extractor.OrganizeHierarchy(dedupMessages, dedupEnums)
 

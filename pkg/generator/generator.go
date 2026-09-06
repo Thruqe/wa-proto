@@ -28,6 +28,14 @@ type Report struct {
 
 // GenerateMonolithic generates a single monolithic WAProto.proto matching wppconnect wa-proto.
 func GenerateMonolithic(schema *ast.ProtoSchema, w io.Writer) error {
+	// Sort entities before FixProto3 so disambiguation is completely deterministic
+	sort.Slice(schema.Enums, func(i, j int) bool {
+		return schema.Enums[i].Name < schema.Enums[j].Name
+	})
+	sort.Slice(schema.Messages, func(i, j int) bool {
+		return schema.Messages[i].Name < schema.Messages[j].Name
+	})
+
 	// Ensure strict proto3 compliance (no required fields, first enum is 0)
 	corrector.FixProto3(schema)
 

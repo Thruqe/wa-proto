@@ -661,12 +661,28 @@ func OrganizeHierarchy(messages []*protoAst.MessageDef, enums []*protoAst.EnumDe
 		}
 	}
 
+	for _, m := range messages {
+		sort.Slice(m.NestedEnums, func(i, j int) bool {
+			return m.NestedEnums[i].Name < m.NestedEnums[j].Name
+		})
+		sort.Slice(m.NestedMessages, func(i, j int) bool {
+			return m.NestedMessages[i].Name < m.NestedMessages[j].Name
+		})
+	}
+
 	var topMessages []*protoAst.MessageDef
 	for _, item := range msgList {
 		if !nestedSet[item.fullName] {
 			topMessages = append(topMessages, item.m)
 		}
 	}
+
+	sort.Slice(topMessages, func(i, j int) bool {
+		return topMessages[i].Name < topMessages[j].Name
+	})
+	sort.Slice(topEnums, func(i, j int) bool {
+		return topEnums[i].Name < topEnums[j].Name
+	})
 
 	return topMessages, topEnums
 }
