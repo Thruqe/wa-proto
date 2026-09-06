@@ -52,11 +52,12 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
+          token: ${{ secrets.GH_TOKEN || secrets.GIT_TOKEN || secrets.RELEASE_PAT || secrets.PAT || github.token }}
 
       - name: Setup Git
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name "Thruqe"
+          git config user.email "danielpeter0039@gmail.com"
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -95,7 +96,7 @@ jobs:
         if: steps.changes.outputs.detected == 'true'
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN || secrets.GIT_TOKEN || secrets.RELEASE_PAT || secrets.PAT || github.token }}
         run: |
           version=$(grep "WhatsApp Version" WAProto.proto | cut -d":" -f2 | xargs)
           tag="v${version}"
