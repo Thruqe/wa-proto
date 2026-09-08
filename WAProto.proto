@@ -1,7 +1,7 @@
 syntax = "proto3";
 package waproto;
 
-/// WhatsApp Version: 2.3000.1046973889
+/// WhatsApp Version: 2.3000.1046985766
 
 enum ABOUT_CONSUMPTION_SURFACE_TYPE {
 	ABOUT_CONSUMPTION_SURFACE_TYPE_UNKNOWN = 0;
@@ -1696,12 +1696,6 @@ enum BUSY_REASON {
 	PSTN_RINGING = 0;
 	PSTN_OFFHOOK = 1;
 	WA_CALL_RINGING_OR_PENDING = 2;
-}
-
-message BackwardEdge {
-	optional bytes encryptedPrevEpochAnonId = 1;
-	optional bytes encryptedPrevEpochRootKey = 2;
-	optional bytes prevEpochRootKeyFingerprint = 3;
 }
 
 enum BannerState {
@@ -5706,19 +5700,6 @@ enum ConversationType {
 	CONVERSATION_TYPE_OTHER = 3;
 }
 
-message CreateBackupInput {
-	optional string recoveryCode = 1;
-	optional uint64 userId = 2;
-}
-
-message CreateBackupOutput {
-	optional DeviceOutput device = 1;
-	optional VirtualDeviceOutput virtualDevice = 2;
-	optional Epoch0Output epoch0 = 3;
-	optional bytes mailboxRootKey = 4;
-	optional string error = 5;
-}
-
 enum CrosspostResponseCodes {
 	CROSSPOSTRESPONSECODES_OK = 0;
 	UNKNOWN_ERROR = 1;
@@ -6436,30 +6417,6 @@ enum DYI_TRIGGER_TYPE_CODE {
 	SCHEDULED = 2;
 }
 
-message DecryptMessageInput {
-	optional bytes epochRootKey = 1;
-	optional bytes epochAnonId = 2;
-	optional string threadId = 3;
-	optional int32 encryptionVersion = 4;
-	optional bytes ciphertext = 5;
-}
-
-message DecryptMessageOutput {
-	optional bytes plaintextPayload = 1;
-	optional string error = 2;
-}
-
-message DeriveMessageKeyInput {
-	optional bytes epochRootKey = 1;
-	optional bytes epochAnonId = 2;
-	optional string threadId = 3;
-}
-
-message DeriveMessageKeyOutput {
-	optional bytes messageKey = 1;
-	optional string error = 2;
-}
-
 message DeviceCapabilities {
 	enum ChatLockSupportLevel {
 		NONE = 0;
@@ -6538,19 +6495,6 @@ message DeviceListMetadata {
 	optional bytes recipientKeyHash = 8;
 	optional uint64 recipientTimestamp = 9;
 	repeated uint32 recipientKeyIndexes = 10 [packed=true];
-}
-
-message DeviceOutput {
-	optional bytes publicKey = 1;
-	optional bytes epochAuthPublicKey = 2;
-	optional bytes epochAuthPublicKeySig = 3;
-	optional bytes epochStoragePublicKey = 4;
-	optional bytes epochStoragePublicKeySig = 5;
-	repeated int32 supportedEncryptionVersions = 6;
-	optional bytes encryptionVersionSignature = 7;
-	optional int32 clientVersion = 8;
-	optional bytes ocmfClientState = 9;
-	optional bytes epochStoragePrivateKey = 10;
 }
 
 message DeviceProps {
@@ -7242,43 +7186,9 @@ message EmbeddedMusic {
 	optional int64 overlapDurationInMs = 14;
 }
 
-message EncryptMessageInput {
-	optional bytes epochRootKey = 1;
-	optional bytes mailboxRootKey = 2;
-	optional bytes orfClientState = 3;
-	optional bytes epochAnonId = 4;
-	optional uint64 epochId = 5;
-	optional string threadId = 6;
-	optional uint64 waCanonicalUserFbid = 7;
-	optional uint64 timestampMs = 8;
-	optional uint64 backupId = 9;
-	optional bytes plaintextPayload = 10;
-	optional string stanzaId = 11;
-}
-
-message EncryptMessageOutput {
-	optional bytes encryptedProtobuf = 1;
-	optional bytes orfThreadId = 2;
-	optional string valueSecretRef = 3;
-	optional uint64 offlineThreadingId = 4;
-	optional uint64 timestampMs = 5;
-	optional string error = 7;
-}
-
 message EncryptedPairingRequest {
 	optional bytes encryptedPayload = 1;
 	optional bytes iv = 2;
-}
-
-message EncryptedSecretValuesOutput {
-	optional bytes encryptedDevicePrivateKey = 1;
-	optional bytes encryptedObliviousValidationTokenBlob = 2;
-	optional bytes encryptedEpochStoragePrivateKey = 3;
-	optional bytes encryptedOcmfClientState = 4;
-	optional bytes encryptedOrfClientStateV2 = 5;
-	optional bytes encryptedMailboxRootKeyBlob = 6;
-	optional bytes encryptedEpochAnonId = 7;
-	optional bytes encryptedEpochRootKey = 8;
 }
 
 enum EndCallReason {
@@ -7299,16 +7209,6 @@ enum EphemeralExemptionType {
 message EphemeralSetting {
 	optional sfixed32 duration = 1;
 	optional sfixed64 timestamp = 2;
-}
-
-message Epoch0Output {
-	optional uint64 epochFbid = 1;
-	optional bytes epochAnonId = 2;
-	optional bytes epochData = 3;
-	optional bytes wrappedRootKeyForSelf = 4;
-	optional bytes epochSignature = 5;
-	optional bytes epochRootKeyFingerprint = 6;
-	optional bytes epochRootKey = 7;
 }
 
 message EventAdditionalMetadata {
@@ -10284,17 +10184,6 @@ enum LWI_SURFACE {
 	LOGIN_ACCOUNT_SELECTION = 3;
 	RESOLVE_PAGE_PERMISSION = 4;
 	ACCOUNT_MANAGEMENT = 5;
-}
-
-message LabyrinthWaCommand {
-	oneof commandInput {
-		CreateBackupInput createBackupInput = 1;
-		EncryptMessageInput encryptMessageInput = 2;
-		DecryptMessageInput decryptMessageInput = 3;
-		OrfThreadIdInput orfThreadIdInput = 4;
-		DeriveMessageKeyInput deriveMessageKeyInput = 5;
-		RotateEpochInput rotateEpochInput = 6;
-	}
 }
 
 enum LeadStage {
@@ -14369,6 +14258,7 @@ enum NS_MODE {
 enum NackReason {
 	NACKREASON_UNKNOWN = 0;
 	UnsupportedMessage = 415;
+	MessageNotAllowed = 420;
 	StaleGroupAddressingMode = 421;
 	NewChatMessagesCapped = 475;
 	ParsingError = 487;
@@ -14899,16 +14789,6 @@ enum OptimisticFontMetrics {
 	OPTIMISTICFONTMETRICS_capHeight = 1400;
 	OPTIMISTICFONTMETRICS_descent = -533;
 	OPTIMISTICFONTMETRICS_unitsPerEm = 2000;
-}
-
-message OrfThreadIdInput {
-	optional bytes orfClientState = 1;
-	optional string threadId = 2;
-}
-
-message OrfThreadIdOutput {
-	optional bytes orfThreadId = 1;
-	optional string error = 2;
 }
 
 enum Orientation {
@@ -17902,37 +17782,6 @@ enum RobotoFontMetrics {
 	ROBOTOFONTMETRICS_capHeight = 1456;
 	ROBOTOFONTMETRICS_descent = -500;
 	ROBOTOFONTMETRICS_unitsPerEm = 2048;
-}
-
-message RotateEpochInput {
-	optional bytes currentEpochRootKey = 1;
-	optional bytes currentEpochAnonId = 2;
-	optional uint64 currentEpochFbid = 3;
-	optional bytes epochStoragePrivateKey = 4;
-	repeated RotateEpochMemberInput members = 5;
-}
-
-message RotateEpochMemberEdge {
-	optional uint64 deviceId = 1;
-	optional bytes encryptedEpochKey = 2;
-	optional bytes deviceEpochHmac = 3;
-}
-
-message RotateEpochMemberInput {
-	optional uint64 deviceId = 1;
-	optional bytes epochStoragePublicKey = 2;
-	optional bytes devicePublicKey = 3;
-}
-
-message RotateEpochOutput {
-	optional bytes newEpochRootKey = 1;
-	optional uint64 newEpochAnonId = 2;
-	optional uint64 newEpochFbid = 8;
-	optional bytes epochAnonId = 3;
-	optional BackwardEdge backwardEdge = 4;
-	repeated RotateEpochMemberEdge memberEdges = 5;
-	optional bytes epochRootKeyFingerprint = 6;
-	optional string error = 7;
 }
 
 message RoutingInfo {
@@ -22755,16 +22604,6 @@ enum ViewRepliesEntryPoint {
 	LABEL_ONLY = 1;
 	LABEL_AND_CONTEXT_MENU = 2;
 	CONTEXT_MENU_ONLY = 3;
-}
-
-message VirtualDeviceOutput {
-	optional bytes vdId = 1;
-	optional bytes vdPublicKey = 2;
-	optional bytes vdEpochStoragePublicKey = 3;
-	optional bytes vdEpochStoragePublicKeySig = 4;
-	optional bytes ocmfRotationToken = 5;
-	optional bytes deviceEpochHmac = 6;
-	optional EncryptedSecretValuesOutput encryptedSecretValues = 7;
 }
 
 enum WAFFLE_LIFECYCLE_ERROR_ACTION_TYPE {
