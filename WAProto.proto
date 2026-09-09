@@ -1,7 +1,7 @@
 syntax = "proto3";
 package waproto;
 
-/// WhatsApp Version: 2.3000.1047086005
+/// WhatsApp Version: 2.3000.1047105332
 
 enum ABOUT_CONSUMPTION_SURFACE_TYPE {
 	ABOUT_CONSUMPTION_SURFACE_TYPE_UNKNOWN = 0;
@@ -5488,6 +5488,7 @@ message ContextInfo {
 		optional int32 agmTitleStrategy = 30;
 		optional int32 agmSubtitleStrategy = 31;
 		optional int32 agmHeaderInteractionStrategy = 32;
+		optional bool containsCtwaFlowsAutoLabel = 33;
 	}
 
 	message FeatureEligibilities {
@@ -5689,6 +5690,7 @@ message Conversation {
 	optional string authAgentParentCompanyName = 61;
 	optional string authAgentObaPhoneNumber = 62;
 	optional IdentityVerificationState identityVerification = 63;
+	optional ACP2Setting acp2Setting = 64;
 }
 
 enum ConversationEndOfHistoryTransferModelPropType {
@@ -6532,6 +6534,8 @@ message DeviceProps {
 		CLOUD_API = 23;
 		SMARTGLASSES = 24;
 		WAIL = 25;
+		WASS = 26;
+		BUSINESS_BACK_OFFICE = 27;
 	}
 
 	message AppVersion {
@@ -12048,6 +12052,11 @@ message Message {
 		optional string id = 2;
 	}
 
+	message ChatAnimatedWallpaper {
+		optional string animatedWallpaperId = 1;
+		optional float dimLevel = 2;
+	}
+
 	message ChatCustomImageWallpaper {
 		optional string directPath = 1;
 		optional bytes mediaKey = 2;
@@ -12080,6 +12089,7 @@ message Message {
 			Message.ChatSolidColorWallpaper solidColor = 11;
 			Message.ChatStockImageWallpaper stockImage = 12;
 			Message.ChatCustomImageWallpaper customImage = 13;
+			Message.ChatAnimatedWallpaper animatedWallpaper = 14;
 		}
 	}
 
@@ -13252,6 +13262,8 @@ message Message {
 			MARK_AS_VERIFIED_ACTION = 36;
 			COEX_STATE_SYNC = 37;
 			ACP2_SETTING = 39;
+			SHARED_DEVICE_CONTACT_HASH_KEY_SHARE = 40;
+			SHARED_DEVICE_CONTACT_HASH_KEY_REQUEST = 41;
 		}
 
 		optional MessageKey key = 1;
@@ -13285,6 +13297,8 @@ message Message {
 		optional Message.MarkAsVerifiedAction markAsVerifiedAction = 32;
 		optional CoexStateSync coexStateSync = 33;
 		optional ACP2Setting acp2Setting = 35;
+		optional Message.SharedDeviceContactHashKeyShare sharedDeviceContactHashKeyShare = 36;
+		optional Message.SharedDeviceContactHashKeyRequest sharedDeviceContactHashKeyRequest = 37;
 	}
 
 	message QuestionResponseMessage {
@@ -13382,6 +13396,26 @@ message Message {
 	message SenderKeyDistributionMessage {
 		optional string groupId = 1;
 		optional bytes axolotlSenderKeyDistributionMessage = 2;
+	}
+
+	message SharedDeviceContactHashKey {
+		enum Kind {
+			UNKNOWN = 0;
+			LID = 1;
+			PHONE_NUMBER = 2;
+		}
+
+		optional uint32 epoch = 1;
+		optional Message.SharedDeviceContactHashKey.Kind kind = 2;
+		optional bytes keyData = 3;
+	}
+
+	message SharedDeviceContactHashKeyRequest {
+		optional uint32 knownEpoch = 1;
+	}
+
+	message SharedDeviceContactHashKeyShare {
+		repeated Message.SharedDeviceContactHashKey keys = 1;
 	}
 
 	message SplitPaymentMessage {
@@ -20347,6 +20381,20 @@ message SyncActionData {
 }
 
 message SyncActionValue {
+	enum BusinessBroadcastCampaignBBProStatus {
+		BUSINESSBROADCASTCAMPAIGNBBPROSTATUS_UNKNOWN = 0;
+		BB_PRO_ACTIVE = 1;
+		BB_PRO_COMPLETED = 2;
+		BB_PRO_IN_DRAFT = 3;
+		BB_PRO_IN_REVIEW = 4;
+		BB_PRO_NOT_SENDING = 5;
+		BB_PRO_OFF = 6;
+		BB_PRO_REJECTED = 7;
+		BB_PRO_SCHEDULED = 8;
+		BB_PRO_SENDING_LIMITED = 9;
+		BB_PRO_PROCESSING = 10;
+	}
+
 	enum BusinessBroadcastCampaignStatus {
 		BUSINESSBROADCASTCAMPAIGNSTATUS_UNKNOWN = 0;
 		DRAFT = 1;
@@ -20433,6 +20481,8 @@ message SyncActionValue {
 		optional int64 scheduledTimestamp = 7;
 		optional int64 createTimestamp = 8;
 		optional SyncActionValue.BusinessBroadcastCampaignStatus status = 9;
+		optional SyncActionValue.BusinessBroadcastCampaignBBProStatus bbProStatus = 10;
+		optional string customAudienceFbid = 11;
 	}
 
 	message BusinessBroadcastInsightsAction {
@@ -22719,6 +22769,14 @@ enum WAP_JID_SUBTYPE {
 	JID_INTEROP = 4;
 }
 
+enum WATheiaRaTlsState {
+	INIT = 0;
+	WATHEIARATLSSTATE_CONNECTING = 1;
+	WATHEIARATLSSTATE_CONNECTED = 2;
+	WATHEIARATLSSTATE_CLOSED = 3;
+	WATHEIARATLSSTATE_ERROR = 4;
+}
+
 enum WAWebSuspiciousContent {
 	WAWEBSUSPICIOUSCONTENT_NO = 0;
 	YES_KEEP = 1;
@@ -23900,6 +23958,8 @@ message WebMessageInfo {
 		IDENTITY_TRUST_UNMARKED = 227;
 		IDENTITY_TRUST_REVOKED = 228;
 		CTWA_CONSUMER_DISCLOSURE = 230;
+		CHANGE_ACP2_SETTING = 240;
+		EPHEMERAL_CHANGED_FOR_COEX = 248;
 	}
 
 	optional MessageKey key = 1;
