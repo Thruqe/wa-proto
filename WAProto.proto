@@ -1,7 +1,7 @@
 syntax = "proto3";
 package waproto;
 
-/// WhatsApp Version: 2.3000.1047214234
+/// WhatsApp Version: 2.3000.1047236770
 
 enum ABOUT_CONSUMPTION_SURFACE_TYPE {
 	ABOUT_CONSUMPTION_SURFACE_TYPE_UNKNOWN = 0;
@@ -14385,6 +14385,9 @@ enum NewsletterCapability {
 	JARVIS_INTEGRATION_ENABLED = 20;
 	PINNED_MESSAGES = 21;
 	CHANNEL_STATUS_MUSIC = 22;
+	QUESTIONS_STARRING = 23;
+	SCHEDULED_UPDATES = 24;
+	CHANNEL_STATUS_API = 25;
 }
 
 enum NewsletterCompanionGating {
