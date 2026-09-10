@@ -30,7 +30,7 @@ Commands:
   split      Split monolithic WAProto.proto into modular wa-core/proto packages
   fetch      Fetch WhatsApp Web scripts and discover bundle URLs
   generate   Generate protobuf files (monolithic or modular wa-core structure)
-  fix        Correct proto3 compliance issues (removes 'required', ensures enum 0-values)
+  fix        Ensure proto2 compliance (rules default to optional)
   compile    Compile .proto files to .pb.go using protoc
   sync       Full end-to-end: split WAProto.proto -> update clientpayload -> compile .pb.go
   version    Show version info
@@ -187,7 +187,7 @@ func cmdFetch(args []string) {
 	topMessages, topEnums := extractor.OrganizeHierarchy(dedupMessages, dedupEnums)
 
 	schema := &ast.ProtoSchema{
-		Syntax:   "proto3",
+		Syntax:   "proto2",
 		Package:  "waproto",
 		Version:  res.Version,
 		Messages: topMessages,
@@ -307,7 +307,7 @@ func cmdSync(args []string) {
 
 func cmdFix(args []string) {
 	fs := flag.NewFlagSet("fix", flag.ExitOnError)
-	protoPath := fs.String("proto", "WAProto.proto", "Path to .proto file to correct for proto3 compliance")
+	protoPath := fs.String("proto", "WAProto.proto", "Path to .proto file to correct for proto2 compliance")
 	_ = fs.Parse(args)
 
 	content, err := os.ReadFile(*protoPath)
@@ -316,13 +316,13 @@ func cmdFix(args []string) {
 		os.Exit(1)
 	}
 
-	fmt.Printf("🔧 Correcting proto3 issues in %s (fixing 'required' fields and enum zero-values)...\n", *protoPath)
-	fixed := corrector.FixProto3Content(string(content))
+	fmt.Printf("🔧 Ensuring proto2 compliance in %s...\n", *protoPath)
+	fixed := corrector.FixProto2Content(string(content))
 
 	if err := os.WriteFile(*protoPath, []byte(fixed), 0644); err != nil {
 		fmt.Fprintf(os.Stderr, "❌ Failed writing %s: %v\n", *protoPath, err)
 		os.Exit(1)
 	}
 
-	fmt.Printf("✓ %s corrected for proto3 compliance!\n", *protoPath)
+	fmt.Printf("✓ %s verified for proto2 compliance!\n", *protoPath)
 }

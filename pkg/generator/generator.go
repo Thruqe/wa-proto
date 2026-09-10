@@ -26,9 +26,9 @@ type Report struct {
 	GeneratedFiles []string
 }
 
-// GenerateMonolithic generates a single monolithic WAProto.proto matching wppconnect wa-proto.
+// GenerateMonolithic generates a single monolithic WAProto.proto matching wppconnect wa-proto in proto2 syntax.
 func GenerateMonolithic(schema *ast.ProtoSchema, w io.Writer) error {
-	// Sort entities before FixProto3 so disambiguation is completely deterministic
+	// Sort entities before output so disambiguation is completely deterministic
 	sort.Slice(schema.Enums, func(i, j int) bool {
 		return schema.Enums[i].Name < schema.Enums[j].Name
 	})
@@ -36,11 +36,11 @@ func GenerateMonolithic(schema *ast.ProtoSchema, w io.Writer) error {
 		return schema.Messages[i].Name < schema.Messages[j].Name
 	})
 
-	// Ensure strict proto3 compliance (no required fields, first enum is 0)
-	corrector.FixProto3(schema)
+	// Ensure proto2 compliance (rules default to optional)
+	corrector.FixProto2(schema)
 
 	var b strings.Builder
-	b.WriteString("syntax = \"proto3\";\n")
+	b.WriteString("syntax = \"proto2\";\n")
 	b.WriteString("package waproto;\n\n")
 
 	if schema.Version != "" {
